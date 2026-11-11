@@ -1,3 +1,6 @@
+> **Cititec fork** of [WYRE-AI/itglue-mcp](https://github.com/WYRE-AI/itglue-mcp). Before changing anything, read
+> [CITITEC-FORK.md](CITITEC-FORK.md): which changes go back to Wyre and which stay in this fork.
+
 # IT Glue MCP Server
 
 A Model Context Protocol (MCP) server that provides Claude with access to IT Glue documentation and asset management.
