@@ -36,7 +36,8 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Only Wyre's own repo publishes from CI; in forks, cititec-release.yml owns the image.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository_owner == 'WYRE-AI'
 
     permissions:
       contents: read
