@@ -4,6 +4,13 @@
 
 - A rate-limited read (a GET that gets HTTP 429, or a 503 with `Retry-After`) is now retried up to twice, waiting for the `Retry-After` IT Glue sends (or 1 s then 2 s without one). Waits are capped at 10 s each and 20 s in total, and every attempt gets its own 60 s timeout (requests previously had none). When the wait would be longer, the error keeps the `IT Glue API error (429)` prefix and says how long to wait (`Try again in N s.`, 60 s when IT Glue gives no `Retry-After`). Writes (POST, PATCH, DELETE) are never replayed, because IT Glue does not document that a rate-limited or unavailable write had no effect: they fail at once with the wait in the error. A 503 that carries `Retry-After` keeps it in the error (`IT Glue API error (503): Try again in N s.`).
 
+- **`search_documents` returned every document for a name search.** With the folder-inclusive
+  listing (`filter[document_folder_id]=null`), IT Glue ignores `filter[name]` and returns every
+  document in the organization. The handler only fell back to its client-side "contains"
+  match when the response was empty, so the whole unfiltered list was returned as the search
+  result. It now also falls back when any returned document name does not contain the requested
+  name (`nameFilterWasIgnored`). An honoured exact match still returns without a second request.
+
 ### Security
 
 - **Cross-tenant elicitation/confirmation misroute (gateway mode).** The
