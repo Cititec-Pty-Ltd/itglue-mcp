@@ -123,6 +123,7 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 - **get_configuration** - Get a specific configuration by ID
 - **archive_configuration** - Archive a configuration (soft delete — hides it from normal views but keeps it recoverable). Reversible with `unarchive_configuration`. Configurations synced from a PSA/RMM integration (`psaIntegration: enabled` / `syncActive: true`) may be restored or updated by the next sync, so tidy up the source system (Autotask / Datto RMM) first
 - **unarchive_configuration** - Restore a previously archived configuration so it appears in normal views again
+- **update_configuration** - Update chosen fields on a configuration (name, hostname, IP and MAC address, serial number, asset tag, notes, warranty and purchase dates, type, status, location, contact, manufacturer, model, operating system). Only the fields you supply are sent; the result lists any field IT Glue did not apply. Fields synced from a PSA/RMM integration may be put back by the next sync
 
 ### Locations (Addresses/Sites)
 
