@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+### Added
+
+- **`update_configuration`**: update chosen fields on a configuration with `PATCH /configurations/:id`. Only an allow-listed set of fields is sent (text fields, two dates as `YYYY-MM-DD`, and type, status, location, contact, manufacturer, model and operating-system IDs); the organization and archive state cannot be changed through it. The result names any supplied field that IT Glue returned unchanged.
+
+### Changed
+
+- Every write tool now has MCP annotations (`readOnlyHint: false`): `create_location`, `update_location`, `create_document`, `create_document_section`, `update_document_section` and `publish_document` had none. `destructiveHint` is now true for deletes, archives and overwrites (`archive_configuration`, `update_document_section`) and false for restores (`unarchive_document`).
+- A rate-limited request (HTTP 429) now returns `structuredContent: { error_type: "rate_limited", retry_after_seconds, tool }` with the error, as the other Cititec MCP servers do. The text still says `HTTP 429` and `Try again in N s.`. Writes are still sent once and never replayed.
+- `create_document`: when the document is created but adding its content fails, the error now gives the new document's ID and says not to create it again (before, the document existed but the error did not say which one). The description asks callers that may run with no one to answer the folder prompt to pass `document_folder_id` or `skip_folder_prompt`.
+
+### Security
+
+- Write tools check that every ID going into a URL path (`organization_id`, `id`, `document_id`, `section_id`, `resource_id`, `configuration_id`, `document_folder_id`) is a positive integer before sending anything, so a value such as `5/../12` cannot change which record a write reaches. `create_attachment` also refuses a file name containing `/` or `\` and content that is not base64.
+- Write tools that return the stored record (creates, updates, archive/unarchive, publish, attachments) now wrap it in `<itglue-data>` untrusted-content markers like the read tools, because even a name-only change echoes the record's existing free text.
+
 ### Fixed
 
 - A rate-limited read (a GET that gets HTTP 429, or a 503 with `Retry-After`) is now retried once when IT Glue sends a `Retry-After` of at most 10 s, after waiting that long. Every attempt gets its own 60 s timeout (requests previously had none). With no `Retry-After`, or a longer one, the error is returned at once (no invented backoff), and `ITGlueRateLimitError.retryAfterSeconds` holds the same N as the message (at least 1). When the wait would be longer, the error keeps the `IT Glue API error (429)` prefix and says how long to wait (`Try again in N s.`, 60 s when IT Glue gives no `Retry-After`). Writes (POST, PATCH, DELETE) are never replayed, because IT Glue does not document that a rate-limited or unavailable write had no effect: they fail at once with the wait in the error. A 503 that carries `Retry-After` keeps it in the error (`IT Glue API error (503): Try again in N s.`).

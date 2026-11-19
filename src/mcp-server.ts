@@ -260,6 +260,128 @@ function positiveInteger(value: unknown): number | undefined {
   return numeric;
 }
 
+/** A tool error for a bad argument. Nothing has been sent to IT Glue. */
+function argumentError(message: string) {
+  return {
+    content: [{ type: "text" as const, text: `Error: ${message}` }],
+    isError: true,
+  };
+}
+
+/**
+ * Reads ID arguments that end up in a URL path. Each must be a positive
+ * integer (a numeric string is accepted), so a value such as "5/../12" can
+ * never change which record a write reaches. Returns the IDs, or the first
+ * bad argument's name.
+ */
+export function pathIds<K extends string>(
+  args: Record<string, unknown> | undefined,
+  keys: readonly K[]
+): { ids: Record<K, number> } | { bad: K } {
+  const ids = {} as Record<K, number>;
+  for (const key of keys) {
+    const value = positiveInteger(args?.[key]);
+    if (value === undefined) return { bad: key };
+    ids[key] = value;
+  }
+  return { ids };
+}
+
+function badIdError(key: string) {
+  return argumentError(`${key} is required and must be a positive integer`);
+}
+
+/** True for non-empty raw base64 (whitespace and line breaks allowed). */
+export function isBase64(value: string): boolean {
+  const compact = value.replace(/\s+/g, "");
+  return compact.length > 0 && compact.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(compact);
+}
+
+/** Text attributes update_configuration may set (snake_case, as IT Glue accepts on write). */
+export const CONFIGURATION_TEXT_FIELDS = [
+  "name", "hostname", "primary_ip", "mac_address", "default_gateway", "serial_number",
+  "asset_tag", "position", "installed_by", "purchased_by", "notes", "operating_system_notes",
+] as const;
+/** Date attributes update_configuration may set (YYYY-MM-DD). */
+export const CONFIGURATION_DATE_FIELDS = ["warranty_expires_at", "purchased_at"] as const;
+/** ID attributes update_configuration may set. */
+export const CONFIGURATION_ID_FIELDS = [
+  "configuration_type_id", "configuration_status_id", "location_id", "contact_id",
+  "manufacturer_id", "model_id", "operating_system_id",
+] as const;
+
+/**
+ * Builds update_configuration's attributes from the tool arguments, or an
+ * error message. Only the listed fields are sent; organization, archive
+ * state and anything else cannot be changed through this tool.
+ */
+export function configurationUpdateAttributes(
+  args: Record<string, unknown>
+): { attributes: Record<string, string | number> } | { error: string } {
+  const attributes: Record<string, string | number> = {};
+  for (const field of CONFIGURATION_TEXT_FIELDS) {
+    const value = args[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "string") return { error: `${field} must be a string` };
+    if (field === "name" && value.trim() === "") return { error: "name must not be empty" };
+    attributes[field] = value;
+  }
+  for (const field of CONFIGURATION_DATE_FIELDS) {
+    const value = args[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value))) {
+      return { error: `${field} must be a date as YYYY-MM-DD` };
+    }
+    attributes[field] = value;
+  }
+  for (const field of CONFIGURATION_ID_FIELDS) {
+    const value = args[field];
+    if (value === undefined || value === null) continue;
+    const id = positiveInteger(value);
+    if (id === undefined) return { error: `${field} must be a positive integer` };
+    attributes[field] = id;
+  }
+  if (Object.keys(attributes).length === 0) {
+    return { error: "provide at least one field to update (for example name, hostname or notes)" };
+  }
+  return { attributes };
+}
+
+/**
+ * Supplied attributes that the record IT Glue returned does not show with the
+ * new value (IT Glue can ignore an attribute without an error). Compared as
+ * strings, after mapping snake_case to the camelCase keys of a deserialized
+ * record; a field the response leaves out entirely, and notes fields (HTML
+ * that IT Glue may rewrite), are not reported.
+ */
+export function attributesNotApplied(
+  sent: Record<string, string | number>,
+  record: Record<string, unknown> | undefined
+): string[] {
+  if (!record || typeof record !== "object") return [];
+  const notApplied: string[] = [];
+  for (const [field, value] of Object.entries(sent)) {
+    // IT Glue may rewrite HTML in notes, so a difference there means nothing.
+    if (field.endsWith("notes")) continue;
+    const camel = field.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+    if (!(camel in record)) continue;
+    const got = record[camel];
+    if (value === "") {
+      // Clearing a field: IT Glue may return it as null or "".
+      if (got !== null && got !== undefined && got !== "") notApplied.push(field);
+      continue;
+    }
+    if (got === null || got === undefined || String(got) !== String(value)) {
+      // Only a date may come back as a timestamp of the same day; every other
+      // field must match exactly ("ws-010" is not "ws-01").
+      const isDate = (CONFIGURATION_DATE_FIELDS as readonly string[]).includes(field);
+      if (isDate && typeof got === "string" && got.startsWith(`${value}T`)) continue;
+      notApplied.push(field);
+    }
+  }
+  return notApplied;
+}
+
 /**
  * Record types that IT Glue accepts attachments on, as the plural path segment
  * used by `/:resource_type/:resource_id/relationships/attachments`.
@@ -572,15 +694,27 @@ export async function createDocumentWithContent(
 
   if (args.content !== undefined && args.content !== "") {
     const docId = String(newDoc.id);
-    await client.post(`/documents/${docId}/relationships/sections`, {
-      data: {
-        type: "document-sections",
-        attributes: {
-          resource_type: "Document::Text",
-          content: args.content,
+    try {
+      await client.post(`/documents/${docId}/relationships/sections`, {
+        data: {
+          type: "document-sections",
+          attributes: {
+            resource_type: "Document::Text",
+            content: args.content,
+          },
         },
-      },
-    });
+      });
+    } catch (err) {
+      // The document already exists. Say so, with its ID, so the caller adds
+      // the content instead of creating a duplicate document.
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Document ${docId} was created, but adding its content failed: ${msg} ` +
+          `Do not create the document again: add the content with create_document_section ` +
+          `(document_id ${docId}, section_type text).`,
+        { cause: err }
+      );
+    }
   }
 
   return newDoc;
@@ -1396,6 +1530,13 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
         description:
           "Create a new location (physical address/site) for an organization in IT Glue. " +
           "IT Glue requires a name and typically a country_id for a location.",
+        annotations: {
+          title: "Create location",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -1454,6 +1595,13 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
       {
         name: "update_location",
         description: "Update an existing location in IT Glue. Only the fields you supply are changed.",
+        annotations: {
+          title: "Update location",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -1656,7 +1804,14 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
       },
       {
         name: "create_document",
-        description: "Create a new document in IT Glue for an organization. If neither document_folder_id nor skip_folder_prompt is supplied, the user is prompted to pick a folder. Folder enumeration for the name-based picker tries the API key first (works on tenants where IT Glue exposes the Document Folders resource), then a configured JWT; if neither can list folders, the prompt accepts a folder URL, a sibling-document URL, or a numeric folder ID. Pass skip_folder_prompt=true to always create at the organization root without prompting.",
+        description: "Create a new document in IT Glue for an organization. If neither document_folder_id nor skip_folder_prompt is supplied, the user is prompted to pick a folder. Folder enumeration for the name-based picker tries the API key first (works on tenants where IT Glue exposes the Document Folders resource), then a configured JWT; if neither can list folders, the prompt accepts a folder URL, a sibling-document URL, or a numeric folder ID. Pass skip_folder_prompt=true to always create at the organization root without prompting. When the call may run without a person to answer the prompt (for example an approval-gated write), pass document_folder_id, or skip_folder_prompt=true for the root, so the request states where the document goes. If the document is created but adding its content fails, the result says so and gives the new document's ID: do not create it again.",
+        annotations: {
+          title: "Create document",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -1761,6 +1916,13 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
       {
         name: "create_document_section",
         description: "Add a new section to an IT Glue document. Section types: 'heading' (Document::Heading) or 'text' (Document::Text). Call publish_document after editing.",
+        annotations: {
+          title: "Create document section",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -1783,7 +1945,14 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
       },
       {
         name: "update_document_section",
-        description: "Update the content of an existing IT Glue document section. Use list_document_sections to get section IDs. Call publish_document after editing.",
+        description: "Replace the content of an existing IT Glue document section (the old content is overwritten). Use list_document_sections to get section IDs. Call publish_document after editing.",
+        annotations: {
+          title: "Update document section",
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -1891,6 +2060,13 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
       {
         name: "publish_document",
         description: "Publish an IT Glue document to make section changes visible. Always call this after creating, updating, or deleting sections.",
+        annotations: {
+          title: "Publish document",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -1935,7 +2111,7 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
         annotations: {
           title: "Unarchive document (reversible)",
           readOnlyHint: false,
-          destructiveHint: true,
+          destructiveHint: false,
           idempotentHint: true,
           openWorldHint: true,
         },
@@ -1961,7 +2137,7 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
         annotations: {
           title: "Archive configuration (reversible)",
           readOnlyHint: false,
-          destructiveHint: false,
+          destructiveHint: true,
           idempotentHint: true,
           openWorldHint: true,
         },
@@ -1998,6 +2174,57 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
               type: "number",
               description: "The configuration ID to unarchive",
             },
+          },
+          required: ["configuration_id"],
+        },
+      },
+      {
+        name: "update_configuration",
+        description:
+          "Update fields on an IT Glue configuration (device/asset). Only the fields you supply are " +
+          "changed; the old values are overwritten. To archive or restore use archive_configuration / " +
+          "unarchive_configuration. Configurations synced from a PSA or RMM integration " +
+          "(psaIntegration: enabled / syncActive: true on the record) may have synced fields put back " +
+          "by the next sync, so change those in the source system (Autotask / Datto RMM) instead. " +
+          "The result lists any supplied field IT Glue did not apply.",
+        annotations: {
+          title: "Update configuration",
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            configuration_id: {
+              description: "The configuration ID to update. A numeric string is accepted.",
+              anyOf: [
+                { type: "integer", minimum: 1 },
+                { type: "string", pattern: "^[1-9][0-9]*$" },
+              ],
+            },
+            name: { type: "string", description: "Configuration name" },
+            hostname: { type: "string", description: "Hostname" },
+            primary_ip: { type: "string", description: "Primary IP address" },
+            mac_address: { type: "string", description: "MAC address" },
+            default_gateway: { type: "string", description: "Default gateway" },
+            serial_number: { type: "string", description: "Serial number" },
+            asset_tag: { type: "string", description: "Asset tag" },
+            position: { type: "string", description: "Position (e.g. rack position)" },
+            installed_by: { type: "string", description: "Installed by" },
+            purchased_by: { type: "string", description: "Purchased by" },
+            notes: { type: "string", description: "Notes (HTML supported). Replaces the existing notes." },
+            operating_system_notes: { type: "string", description: "Operating system notes" },
+            warranty_expires_at: { type: "string", description: "Warranty expiry date, YYYY-MM-DD" },
+            purchased_at: { type: "string", description: "Purchase date, YYYY-MM-DD" },
+            configuration_type_id: { type: "number", description: "Configuration type ID" },
+            configuration_status_id: { type: "number", description: "Configuration status ID" },
+            location_id: { type: "number", description: "Location ID (in the same organization)" },
+            contact_id: { type: "number", description: "Contact ID (in the same organization)" },
+            manufacturer_id: { type: "number", description: "Manufacturer ID" },
+            model_id: { type: "number", description: "Model ID" },
+            operating_system_id: { type: "number", description: "Operating system ID" },
           },
           required: ["configuration_id"],
         },
@@ -2441,6 +2668,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+        const orgIds = pathIds(args, ["organization_id"] as const);
+        if ("bad" in orgIds) return badIdError(orgIds.bad);
+        if (typeof args.name !== "string" || args.name.trim() === "") {
+          return argumentError("name must be a non-empty string");
+        }
         // IT Glue accepts snake_case attribute keys on write (same precedent as
         // document creation). The organization is supplied via the relationship
         // path, so it is not repeated in attributes.
@@ -2455,7 +2687,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (value !== undefined && value !== null) attributes[field] = value;
         }
         const newLocation = await client.post(
-          `/organizations/${args.organization_id}/relationships/locations`,
+          `/organizations/${orgIds.ids.organization_id}/relationships/locations`,
           { data: { type: "locations", attributes } }
         );
         return {
@@ -2470,6 +2702,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+        const locIds = pathIds(args, ["organization_id", "id"] as const);
+        if ("bad" in locIds) return badIdError(locIds.bad);
         const argv = args as Record<string, unknown>;
         const attributes: Record<string, unknown> = {};
         const writableFields = [
@@ -2487,7 +2721,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
         const updatedLocation = await client.patch(
-          `/organizations/${args.organization_id}/relationships/locations/${args.id}`,
+          `/organizations/${locIds.ids.organization_id}/relationships/locations/${locIds.ids.id}`,
           { data: { type: "locations", attributes } }
         );
         return {
@@ -2850,8 +3084,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+        const docOrg = pathIds(args, ["organization_id"] as const);
+        if ("bad" in docOrg) return badIdError(docOrg.bad);
+        if (typeof args.name !== "string" || args.name.trim() === "") {
+          return argumentError("name must be a non-empty string");
+        }
+        if (args.content !== undefined && args.content !== null && typeof args.content !== "string") {
+          return argumentError("content must be a string");
+        }
+        if (args.document_folder_id !== undefined && args.document_folder_id !== null &&
+            positiveInteger(args.document_folder_id) === undefined) {
+          return badIdError("document_folder_id");
+        }
 
-        let folderId = args.document_folder_id as number | string | undefined;
+        let folderId = (args.document_folder_id ?? undefined) as number | string | undefined;
         const skipPrompt = args.skip_folder_prompt === true;
 
         if (folderId === undefined && !skipPrompt) {
@@ -3049,6 +3295,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+        const newSectionIds = pathIds(args, ["document_id"] as const);
+        if ("bad" in newSectionIds) return badIdError(newSectionIds.bad);
+        if (typeof args.content !== "string") return argumentError("content must be a string");
         // IT Glue's API stores the section-type value in the `resource_type`
         // attribute (values `Document::Text` / `Document::Heading`). The
         // `section-type` field is accepted but ignored, and passing a
@@ -3066,7 +3315,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
         const newSection = await client.post(
-          `/documents/${args.document_id}/relationships/sections`,
+          `/documents/${newSectionIds.ids.document_id}/relationships/sections`,
           {
             data: {
               type: "document-sections",
@@ -3089,8 +3338,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+        const editIds = pathIds(args, ["document_id", "section_id"] as const);
+        if ("bad" in editIds) return badIdError(editIds.bad);
+        if (typeof args.content !== "string") return argumentError("content must be a string");
         const updatedSection = await client.patch(
-          `/documents/${args.document_id}/relationships/sections/${args.section_id}`,
+          `/documents/${editIds.ids.document_id}/relationships/sections/${editIds.ids.section_id}`,
           {
             data: {
               type: "document-sections",
@@ -3112,11 +3364,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+        const delIds = pathIds(args, ["document_id", "section_id"] as const);
+        if ("bad" in delIds) return badIdError(delIds.bad);
         await client.delete(
-          `/documents/${args.document_id}/relationships/sections/${args.section_id}`
+          `/documents/${delIds.ids.document_id}/relationships/sections/${delIds.ids.section_id}`
         );
         return {
-          content: [{ type: "text", text: `Section ${args.section_id} deleted successfully` }],
+          content: [{ type: "text", text: `Section ${delIds.ids.section_id} deleted successfully` }],
         };
       }
 
@@ -3143,8 +3397,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+        const attachIds = pathIds(args, ["resource_id"] as const);
+        if ("bad" in attachIds) return badIdError(attachIds.bad);
+        if (typeof args.file_name !== "string" || args.file_name.trim() === "" || /[\\/]/.test(args.file_name)) {
+          return argumentError("file_name must be a file name with no folder (no / or \\)");
+        }
+        if (typeof args.content !== "string" || !isBase64(stripDataUriPrefix(args.content))) {
+          return argumentError("content must be base64-encoded file contents");
+        }
         const attachment = await client.post(
-          `/${args.resource_type}/${args.resource_id}/relationships/attachments`,
+          `/${args.resource_type}/${attachIds.ids.resource_id}/relationships/attachments`,
           {
             data: {
               type: "attachments",
@@ -3195,8 +3457,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+        const pubIds = pathIds(args, ["document_id"] as const);
+        if ("bad" in pubIds) return badIdError(pubIds.bad);
         // Publish uses PATCH — POST returns 404
-        const published = await client.patch(`/documents/${args.document_id}/publish`);
+        const published = await client.patch(`/documents/${pubIds.ids.document_id}/publish`);
         return {
           content: [{ type: "text", text: JSON.stringify(published, null, 2) }],
         };
@@ -3213,8 +3477,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // IT Glue toggles archive state via PATCH /documents/:id with the
         // standard JSON:API document resource shape. There is no dedicated
         // /archive sub-endpoint — only the `archived` boolean attribute.
+        const archDocIds = pathIds(args, ["document_id"] as const);
+        if ("bad" in archDocIds) return badIdError(archDocIds.bad);
         const archived = name === "archive_document";
-        const result = await client.patch(`/documents/${args.document_id}`, {
+        const result = await client.patch(`/documents/${archDocIds.ids.document_id}`, {
           data: {
             type: "documents",
             attributes: { archived },
@@ -3236,8 +3502,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // IT Glue toggles archive state via PATCH /configurations/:id with the
         // standard JSON:API document resource shape. There is no dedicated
         // /archive sub-endpoint — only the `archived` boolean attribute.
+        const archCfgIds = pathIds(args, ["configuration_id"] as const);
+        if ("bad" in archCfgIds) return badIdError(archCfgIds.bad);
         const archived = name === "archive_configuration";
-        const result = await client.patch(`/configurations/${args.configuration_id}`, {
+        const result = await client.patch(`/configurations/${archCfgIds.ids.configuration_id}`, {
           data: {
             type: "configurations",
             attributes: { archived },
@@ -3245,6 +3513,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case "update_configuration": {
+        const cfgIds = pathIds(args, ["configuration_id"] as const);
+        if ("bad" in cfgIds) return badIdError(cfgIds.bad);
+        const built = configurationUpdateAttributes((args ?? {}) as Record<string, unknown>);
+        if ("error" in built) return argumentError(built.error);
+        const updated = await client.patch<Record<string, unknown>>(
+          `/configurations/${cfgIds.ids.configuration_id}`,
+          { data: { type: "configurations", attributes: built.attributes } }
+        );
+        const notApplied = attributesNotApplied(built.attributes, updated);
+        const note = notApplied.length > 0
+          ? `Note: IT Glue accepted the request but did not apply: ${notApplied.join(", ")}.\n\n`
+          : "";
+        return {
+          content: [{ type: "text", text: note + JSON.stringify(updated, null, 2) }],
         };
       }
 
@@ -3391,6 +3677,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    // Fleet 429 policy: a rate limit is a typed error so a client can tell it
+    // apart and wait. The text keeps "HTTP 429" and "Try again in N s." for the
+    // MCP host's cooldown. A write is never replayed (see rate-limit.ts).
+    const rateLimit =
+      error instanceof ITGlueRateLimitError
+        ? error
+        : error instanceof Error && error.cause instanceof ITGlueRateLimitError
+          ? error.cause
+          : undefined;
+    if (rateLimit) {
+      return {
+        content: [{ type: "text", text: `Error: ${errorMessage}` }],
+        isError: true,
+        structuredContent: {
+          error_type: "rate_limited",
+          retry_after_seconds: rateLimit.retryAfterSeconds,
+          tool: name,
+        },
+      };
+    }
     return {
       content: [
         {

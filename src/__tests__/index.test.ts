@@ -1118,7 +1118,7 @@ describe("Unknown Tool Handling", () => {
     const client = await connectClient();
     const { tools } = await client.listTools();
 
-    expect(tools.length).toBe(31);
+    expect(tools.length).toBe(32);
     // Every advertised tool must reach a real branch — not the Unknown-tool
     // default — so a rename in the ListTools block can't drift from the switch.
     for (const tool of tools) {
@@ -1676,10 +1676,10 @@ describe("Locations tools (round-trip)", () => {
     );
   });
 
-  it("exposes 31 tools total", async () => {
+  it("exposes 32 tools total", async () => {
     const client = await connectLocationsClient();
     const { tools } = await client.listTools();
-    expect(tools.length).toBe(31);
+    expect(tools.length).toBe(32);
   });
 
   it("search_locations queries /locations filtered by organization and city", async () => {
