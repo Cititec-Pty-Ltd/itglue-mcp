@@ -366,9 +366,16 @@ export function attributesNotApplied(
     const camel = field.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
     if (!(camel in record)) continue;
     const got = record[camel];
+    if (value === "") {
+      // Clearing a field: IT Glue may return it as null or "".
+      if (got !== null && got !== undefined && got !== "") notApplied.push(field);
+      continue;
+    }
     if (got === null || got === undefined || String(got) !== String(value)) {
-      // Dates may come back as timestamps; accept a same-day prefix.
-      if (typeof got === "string" && typeof value === "string" && got.startsWith(value)) continue;
+      // Only a date may come back as a timestamp of the same day; every other
+      // field must match exactly ("ws-010" is not "ws-01").
+      const isDate = (CONFIGURATION_DATE_FIELDS as readonly string[]).includes(field);
+      if (isDate && typeof got === "string" && got.startsWith(`${value}T`)) continue;
       notApplied.push(field);
     }
   }

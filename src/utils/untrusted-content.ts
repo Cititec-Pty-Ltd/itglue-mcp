@@ -122,6 +122,22 @@ export const UNTRUSTED_CONTENT_TOOLS: ReadonlySet<string> = new Set([
   // Flexible assets are entirely user-defined free-form fields — by design
   // there is no schema constraining what an org puts in them.
   "search_flexible_assets",
+
+  // Writes that return the stored record. Even a name-only change echoes the
+  // record's existing free text (notes, hostname, address, section HTML).
+  "create_location",
+  "update_location",
+  "create_document",
+  "update_document",
+  "create_document_section",
+  "update_document_section",
+  "publish_document",
+  "archive_document",
+  "unarchive_document",
+  "archive_configuration",
+  "unarchive_configuration",
+  "update_configuration",
+  "create_attachment",
 ]);
 
 /** Whether markers should be applied, per `ITGLUE_UNTRUSTED_MARKERS`. Defaults to on. */

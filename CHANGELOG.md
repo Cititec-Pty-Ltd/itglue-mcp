@@ -13,6 +13,7 @@
 ### Security
 
 - Write tools check that every ID going into a URL path (`organization_id`, `id`, `document_id`, `section_id`, `resource_id`, `configuration_id`, `document_folder_id`) is a positive integer before sending anything, so a value such as `5/../12` cannot change which record a write reaches. `create_attachment` also refuses a file name containing `/` or `\` and content that is not base64.
+- Write tools that return the stored record (creates, updates, archive/unarchive, publish, attachments) now wrap it in `<itglue-data>` untrusted-content markers like the read tools, because even a name-only change echoes the record's existing free text.
 
 ### Fixed
 
