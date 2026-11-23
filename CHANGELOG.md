@@ -19,6 +19,12 @@
 
 - A rate-limited read (a GET that gets HTTP 429, or a 503 with `Retry-After`) is now retried once when IT Glue sends a `Retry-After` of at most 10 s, after waiting that long. Every attempt gets its own 60 s timeout (requests previously had none). With no `Retry-After`, or a longer one, the error is returned at once (no invented backoff), and `ITGlueRateLimitError.retryAfterSeconds` holds the same N as the message (at least 1). When the wait would be longer, the error keeps the `IT Glue API error (429)` prefix and says how long to wait (`Try again in N s.`, 60 s when IT Glue gives no `Retry-After`). Writes (POST, PATCH, DELETE) are never replayed, because IT Glue does not document that a rate-limited or unavailable write had no effect: they fail at once with the wait in the error. A 503 that carries `Retry-After` keeps it in the error (`IT Glue API error (503): Try again in N s.`).
 
+- **The HTTP transport no longer exits on a malformed request (WYREAI-741).** The request
+  target was parsed against the client-supplied `Host` header, and a value that does not parse
+  (or a target such as `//`) threw inside the request listener before authentication. The
+  target is now parsed against a fixed base, so `Host` is no longer consulted, and a target
+  that still cannot be parsed gets a `400` JSON response while the server keeps running.
+
 - **`search_documents` returned every document for a name search.** With the folder-inclusive
   listing (`filter[document_folder_id]=null`), IT Glue ignores `filter[name]` and returns every
   document in the organization. The handler only fell back to its client-side "contains"
