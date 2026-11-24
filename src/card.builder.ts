@@ -97,52 +97,157 @@ function label(name: unknown, id: unknown): string | undefined {
   return undefined;
 }
 
+/** Named entities decoded for the preview. `&amp;` is handled separately, last. */
+const NAMED_ENTITIES: Record<string, string> = {
+  nbsp: " ",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+};
+
+/**
+ * Decode one entity reference, or return it unchanged when it is unknown or
+ * names an invalid code point.
+ */
+function decodeEntity(match: string, ref: string): string {
+  if (ref[0] === "#") {
+    const hex = ref[1] === "x" || ref[1] === "X";
+    const code = Number.parseInt(ref.slice(hex ? 2 : 1), hex ? 16 : 10);
+    if (!Number.isFinite(code) || code < 1 || code > 0x10ffff) return match;
+    if (code >= 0xd800 && code <= 0xdfff) return match;
+    return String.fromCodePoint(code);
+  }
+  return NAMED_ENTITIES[ref.toLowerCase()] ?? match;
+}
+
 /**
  * Flatten a section's HTML body to a short plain-text preview. Vendor HTML is
  * untrusted; the card renders this string only ever as a DOM text node, so
  * this strip is about signal (a readable preview), not sanitization.
+ *
+ * Entities are decoded exactly once: `&amp;` is decoded last so an escaped
+ * entity such as `&amp;lt;` reads as the literal text `&lt;`, not `<`.
  */
 function htmlToPreview(html: string): string {
   return html
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
     .replace(/<[^>]*>/g, " ")
-    .replace(/&nbsp;/gi, " ")
+    .replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (match, ref: string) =>
+      ref.toLowerCase() === "amp" ? match : decodeEntity(match, ref)
+    )
     .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, CARD_SECTION_MAX_LENGTH);
 }
 
-/**
- * Normalize one entry of a document's sectioned body — either an element of
- * the `content` array IT Glue embeds on the document itself, or a resource
- * from the `/documents/:id/relationships/sections` endpoint (deserialized to
- * camelCase by the client).
- */
-function toCardSection(entry: unknown): DocumentCard["sections"][number] | null {
-  if (typeof entry === "string") {
-    const text = htmlToPreview(entry);
-    return text ? { text } : null;
+/** First non-empty string among `keys` on `obj`. */
+function pickString(obj: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = obj[key];
+    if (typeof value === "string" && value) return value;
   }
-  if (!entry || typeof entry !== "object") return null;
-  const section = entry as Record<string, unknown>;
-  const body = section.content;
-  if (typeof body !== "string" || !body) return null;
-  const text = htmlToPreview(body);
-  if (!text) return null;
-  const resourceType = String(
-    section.resourceType ?? section["resource-type"] ?? section.resource_type ?? ""
-  );
-  return /heading/i.test(resourceType) ? { heading: true, text } : { text };
+  return undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+interface RawSection {
+  body: string;
+  resourceType: string;
+  sort: number | undefined;
 }
 
 /**
- * Build the renderable card from a get_document payload. `doc` may already
- * carry its sectioned body in `content` (IT Glue embeds it on the document
- * resource); otherwise sections are fetched best-effort so the card has a
+ * Read one entry of a document's sectioned body. IT Glue hands sections back
+ * in several shapes, and the client only camelCases top-level attributes, so
+ * nested keys keep their wire spelling:
+ *
+ *   - `content` embedded on the document:
+ *     `{ resource_type, resource: { content }, sort }`
+ *   - `sections` embedded on the document (raw JSON:API):
+ *     `{ type, attributes: { content, "rendered-content", "resource-type", sort } }`
+ *   - the `/documents/:id/relationships/sections` endpoint, deserialized:
+ *     `{ id, type, content, resourceType, sort }`
+ *
+ * A bare HTML string is accepted too. The section's own `content` wins over
+ * `rendered-content`.
+ */
+function readSection(entry: unknown): RawSection | null {
+  if (typeof entry === "string") {
+    return entry ? { body: entry, resourceType: "", sort: undefined } : null;
+  }
+  const outer = asRecord(entry);
+  if (!outer) return null;
+  // Most specific first: the section resource, then JSON:API attributes, then the entry.
+  const layers = [asRecord(outer.resource), asRecord(outer.attributes), outer].filter(
+    (layer): layer is Record<string, unknown> => layer !== undefined
+  );
+
+  const bodyKeys = ["content", "renderedContent", "rendered-content", "rendered_content"];
+  const typeKeys = ["resourceType", "resource-type", "resource_type"];
+  let body: string | undefined;
+  let resourceType: string | undefined;
+  let sort: number | undefined;
+  for (const layer of layers) {
+    body ??= pickString(layer, bodyKeys);
+    resourceType ??= pickString(layer, typeKeys);
+    if (sort === undefined) {
+      const raw = layer.sort;
+      const n = typeof raw === "string" && raw.trim() ? Number(raw) : raw;
+      if (typeof n === "number" && Number.isFinite(n)) sort = n;
+    }
+  }
+  if (!body) return null;
+  return { body, resourceType: resourceType ?? "", sort };
+}
+
+/**
+ * Normalize a list of section entries into card sections: ordered by `sort`
+ * (entries without one keep their place after the sorted ones), flattened to
+ * text, headings flagged, empty bodies dropped, capped at CARD_SECTION_LIMIT.
+ */
+function toCardSections(entries: unknown[]): DocumentCard["sections"] {
+  const raw = entries
+    .map((entry, index) => ({ section: readSection(entry), index }))
+    .filter((e): e is { section: RawSection; index: number } => e.section !== null);
+  raw.sort((a, b) => {
+    const sa = a.section.sort ?? Number.POSITIVE_INFINITY;
+    const sb = b.section.sort ?? Number.POSITIVE_INFINITY;
+    return sa === sb ? a.index - b.index : sa < sb ? -1 : 1;
+  });
+
+  const sections: DocumentCard["sections"] = [];
+  for (const { section } of raw) {
+    if (sections.length >= CARD_SECTION_LIMIT) break;
+    const text = htmlToPreview(section.body);
+    if (!text) continue;
+    sections.push(/heading/i.test(section.resourceType) ? { heading: true, text } : { text });
+  }
+  return sections;
+}
+
+/**
+ * The sectioned body already on the document, if any: `content` (IT Glue's
+ * embedded body) first, then an embedded `sections` list. Returns null when
+ * neither is an array, which is the only case that needs a fetch.
+ */
+function embeddedSections(doc: Record<string, unknown>): unknown[] | null {
+  const candidates = [doc.content, doc.sections].filter(Array.isArray) as unknown[][];
+  if (candidates.length === 0) return null;
+  return candidates.find((list) => list.some((entry) => readSection(entry) !== null))
+    ?? candidates[0];
+}
+
+/**
+ * Build the renderable card from a get_document payload. The sections come
+ * from the body already on the document (`content` or `sections`) when it is
+ * there; only otherwise are they fetched, best-effort, so the card has a
  * visible content preview.
  */
 export async function buildDocumentCard(
@@ -171,20 +276,15 @@ export async function buildDocumentCard(
   // A short content preview gives the card its value. Prefer the body IT Glue
   // embeds on the document; fall back to the sections endpoint.
   try {
-    let body: unknown = doc.content;
-    if (!Array.isArray(body)) {
+    let body = embeddedSections(doc);
+    if (body === null) {
       const response = await client.request(
         `/documents/${card.id}/relationships/sections`,
         {}
       );
-      body = response.data;
+      body = Array.isArray(response.data) ? response.data : null;
     }
-    if (Array.isArray(body)) {
-      card.sections = body
-        .map(toCardSection)
-        .filter((s): s is DocumentCard["sections"][number] => s !== null)
-        .slice(0, CARD_SECTION_LIMIT);
-    }
+    if (body) card.sections = toCardSections(body);
   } catch {
     // Best-effort: render the card without a preview rather than failing the tool.
   }
