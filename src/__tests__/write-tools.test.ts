@@ -102,6 +102,17 @@ describe("write tool annotations", () => {
   });
 });
 
+describe("update_configuration description", () => {
+  it("says which fields a configuration synced from an RMM/PSA accepts", async () => {
+    const { tools } = await (await connect()).listTools();
+    const d = tools.find((t) => t.name === "update_configuration")?.description ?? "";
+    expect(d).toContain("synced from an RMM/PSA (see get_configuration");
+    for (const field of ["serial_number", "asset_tag", "notes", "warranty_expires_at", "purchased_at"]) {
+      expect(d).toContain(field);
+    }
+  });
+});
+
 describe("IDs in URL paths", () => {
   it("pathIds accepts positive integers and numeric strings only", () => {
     expect(pathIds({ a: 5, b: "12" }, ["a", "b"] as const)).toEqual({ ids: { a: 5, b: 12 } });

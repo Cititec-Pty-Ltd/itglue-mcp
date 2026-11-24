@@ -6,6 +6,7 @@
 
 ### Changed
 
+- `update_configuration`: the description now says that a configuration synced from an RMM/PSA (`syncActive: true` on `get_configuration`) accepts only `serial_number`, `asset_tag`, `notes`, `warranty_expires_at` and `purchased_at`; IT Glue refuses any other attribute of a synced resource with a 422 error (before, it said synced fields might be put back by the next sync).
 - Every write tool now has MCP annotations (`readOnlyHint: false`): `create_location`, `update_location`, `create_document`, `create_document_section`, `update_document_section` and `publish_document` had none. `destructiveHint` is now true for deletes, archives and overwrites (`archive_configuration`, `update_document_section`) and false for restores (`unarchive_document`).
 - A rate-limited request (HTTP 429) now returns `structuredContent: { error_type: "rate_limited", retry_after_seconds, tool }` with the error, as the other Cititec MCP servers do. The text still says `HTTP 429` and `Try again in N s.`. Writes are still sent once and never replayed.
 - `create_document`: when the document is created but adding its content fails, the error now gives the new document's ID and says not to create it again (before, the document existed but the error did not say which one). The description asks callers that may run with no one to answer the folder prompt to pass `document_folder_id` or `skip_folder_prompt`.
