@@ -243,6 +243,186 @@ describe("MCP Apps document card", () => {
       expect(await buildDocumentCard({ name: "no id" }, client as never)).toBeNull();
     });
 
+    describe("sections already in the payload", () => {
+      // Shapes as get_document returns them: the client camelCases only the
+      // document's top-level attributes, so entries inside `content` and
+      // `sections` keep IT Glue's wire spelling.
+      const embeddedContent = [
+        {
+          resource_type: "Document::Text",
+          resource: { content: "<p>Restart the <b>print spooler</b> service.</p>" },
+          sort: 2,
+        },
+        {
+          resource_type: "Document::Heading",
+          resource: { content: "Procedure" },
+          sort: 1,
+        },
+        {
+          resource_type: "Document::Text",
+          resource: { content: "<ol><li>Open Services</li><li>Find the spooler</li></ol>" },
+          sort: 0,
+        },
+      ];
+      const embeddedSections = [
+        {
+          type: "document-sections",
+          attributes: {
+            content: "<p>Check the queue is empty.</p>",
+            "rendered-content": "<p>Check the queue is empty.</p>",
+            "resource-type": "Document::Text",
+            sort: 1,
+          },
+        },
+        {
+          type: "document-sections",
+          attributes: {
+            content: "<ol><li>Sign in to the server</li></ol>",
+            "rendered-content": "<ol><li>Sign in to the server</li></ol>",
+            "resource-type": "Document::Text",
+            sort: 0,
+          },
+        },
+        {
+          type: "document-sections",
+          attributes: {
+            content: "Before you start",
+            "rendered-content": "Before you start",
+            "resource-type": "Document::Heading",
+            sort: -1,
+          },
+        },
+      ];
+
+      it("reads the embedded content shape (body under resource), sorted by sort", async () => {
+        mockRequest.mockClear();
+        const card = await buildDocumentCard({ ...doc, content: embeddedContent }, client as never);
+        expect(mockRequest).not.toHaveBeenCalled();
+        expect(card?.sections).toEqual([
+          { text: "Open Services Find the spooler" },
+          { heading: true, text: "Procedure" },
+          { text: "Restart the print spooler service." },
+        ]);
+      });
+
+      it("reads the embedded JSON:API sections shape (kebab-case attributes), sorted by sort", async () => {
+        mockRequest.mockClear();
+        const card = await buildDocumentCard({ ...doc, sections: embeddedSections }, client as never);
+        expect(mockRequest).not.toHaveBeenCalled();
+        expect(card?.sections).toEqual([
+          { heading: true, text: "Before you start" },
+          { text: "Sign in to the server" },
+          { text: "Check the queue is empty." },
+        ]);
+      });
+
+      it("prefers content when both shapes are present", async () => {
+        mockRequest.mockClear();
+        const card = await buildDocumentCard(
+          { ...doc, content: embeddedContent, sections: embeddedSections },
+          client as never
+        );
+        expect(mockRequest).not.toHaveBeenCalled();
+        expect(card?.sections[0]).toEqual({ text: "Open Services Find the spooler" });
+        expect(card?.sections).toHaveLength(3);
+      });
+
+      it("uses sections when content has nothing readable", async () => {
+        mockRequest.mockClear();
+        const card = await buildDocumentCard(
+          {
+            ...doc,
+            content: [{ resource_type: "Document::Gallery", resource: {}, sort: 0 }],
+            sections: embeddedSections,
+          },
+          client as never
+        );
+        expect(mockRequest).not.toHaveBeenCalled();
+        expect(card?.sections[0]).toEqual({ heading: true, text: "Before you start" });
+      });
+
+      it("falls back to rendered-content when content is missing", async () => {
+        const card = await buildDocumentCard(
+          {
+            ...doc,
+            sections: [
+              {
+                type: "document-sections",
+                attributes: {
+                  "rendered-content": "<p>Rendered only</p>",
+                  "resource-type": "Document::Text",
+                  sort: 0,
+                },
+              },
+            ],
+          },
+          client as never
+        );
+        expect(card?.sections).toEqual([{ text: "Rendered only" }]);
+      });
+
+      it("treats other section types as plain text and skips empty ones", async () => {
+        const card = await buildDocumentCard(
+          {
+            ...doc,
+            content: [
+              { resource_type: "Document::Step", resource: { content: "<p>Step one</p>" }, sort: 0 },
+              { resource_type: "Document::Gallery", resource: {}, sort: 1 },
+              { resource_type: "Document::Text", resource: { content: "<p> </p>" }, sort: 2 },
+            ],
+          },
+          client as never
+        );
+        expect(card?.sections).toEqual([{ text: "Step one" }]);
+      });
+
+      it("does not fetch for a document whose embedded body is empty", async () => {
+        mockRequest.mockClear();
+        const card = await buildDocumentCard({ ...doc, content: [] }, client as never);
+        expect(mockRequest).not.toHaveBeenCalled();
+        expect(card?.sections).toEqual([]);
+      });
+
+      it("sorts fetched sections by sort too", async () => {
+        const fetching = {
+          request: vi.fn(async () => ({
+            data: [
+              { id: "2", type: "document-sections", content: "<p>Second</p>", resourceType: "Document::Text", sort: 1 },
+              { id: "1", type: "document-sections", content: "First", resourceType: "Document::Heading", sort: 0 },
+            ],
+            meta: { currentPage: 1, nextPage: null, prevPage: null, totalPages: 1, totalCount: 2 },
+          })),
+        };
+        const card = await buildDocumentCard(doc, fetching as never);
+        expect(fetching.request).toHaveBeenCalledWith("/documents/9001/relationships/sections", {});
+        expect(card?.sections).toEqual([{ heading: true, text: "First" }, { text: "Second" }]);
+      });
+
+      it("strips markup and decodes entities exactly once", async () => {
+        const card = await buildDocumentCard(
+          {
+            ...doc,
+            content: [
+              {
+                resource_type: "Document::Text",
+                resource: {
+                  content:
+                    "<script>alert(1)</script><style>p{}</style>" +
+                    "<p>Use &lt;b&gt; tags, not &amp;lt;b&amp;gt; &#8212; R&amp;D&nbsp;&#x27;ok&#39;</p>" +
+                    "<img src=x onerror=alert(2)>",
+                },
+                sort: 0,
+              },
+            ],
+          },
+          client as never
+        );
+        const text = card?.sections[0].text;
+        expect(text).toBe("Use <b> tags, not &lt;b&gt; — R&D 'ok'");
+        expect(text).not.toMatch(/alert|onerror|<img|<script/);
+      });
+    });
+
     it("survives section-fetch failures (card is best-effort)", async () => {
       const failing = {
         request: vi.fn(async () => {
@@ -318,6 +498,59 @@ describe("MCP Apps document card", () => {
         organization: "Acme Corp",
         folder: "#12",
         sections: [{ text: "Badge in at the rear entrance." }],
+      });
+    });
+
+    it("fills the card from the document's own content and sections (no refetch)", async () => {
+      mockFetch.mockReset();
+      mockFetch.mockReturnValueOnce(
+        jsonApiResponse({
+          data: {
+            id: "9003",
+            type: "documents",
+            attributes: {
+              name: "Printer Queue Reset",
+              "organization-id": 77,
+              "organization-name": "Example Org",
+              content: [
+                {
+                  resource_type: "Document::Text",
+                  resource: { content: "<ol><li>Stop the spooler</li></ol>" },
+                  sort: 1,
+                },
+                {
+                  resource_type: "Document::Heading",
+                  resource: { content: "Steps" },
+                  sort: 0,
+                },
+              ],
+              sections: [
+                {
+                  type: "document-sections",
+                  attributes: {
+                    content: "<ol><li>Stop the spooler</li></ol>",
+                    "rendered-content": "<ol><li>Stop the spooler</li></ol>",
+                    "resource-type": "Document::Text",
+                    sort: 0,
+                  },
+                },
+              ],
+            },
+          },
+        })
+      );
+
+      const client = await connectClient();
+      const result = (await client.callTool({
+        name: "get_document",
+        arguments: { organization_id: 77, id: "9003" },
+      })) as { structuredContent?: Record<string, unknown>; isError?: boolean };
+
+      expect(result.isError).toBeFalsy();
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(result.structuredContent?._card).toMatchObject({
+        id: "9003",
+        sections: [{ heading: true, text: "Steps" }, { text: "Stop the spooler" }],
       });
     });
 
