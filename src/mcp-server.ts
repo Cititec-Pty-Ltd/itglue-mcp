@@ -2183,10 +2183,11 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
         description:
           "Update fields on an IT Glue configuration (device/asset). Only the fields you supply are " +
           "changed; the old values are overwritten. To archive or restore use archive_configuration / " +
-          "unarchive_configuration. Configurations synced from a PSA or RMM integration " +
-          "(psaIntegration: enabled / syncActive: true on the record) may have synced fields put back " +
-          "by the next sync, so change those in the source system (Autotask / Datto RMM) instead. " +
-          "The result lists any supplied field IT Glue did not apply.",
+          "unarchive_configuration. If the configuration is synced from an RMM/PSA (see " +
+          "get_configuration: syncActive: true, psaIntegration: enabled), only these fields can be " +
+          "changed: serial_number, asset_tag, notes, warranty_expires_at and purchased_at (IT Glue " +
+          "refuses any other attribute of a synced resource with a 422 error); change the rest in the " +
+          "source system. The result lists any supplied field IT Glue did not apply.",
         annotations: {
           title: "Update configuration",
           readOnlyHint: false,
