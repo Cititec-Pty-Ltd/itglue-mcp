@@ -367,6 +367,10 @@ describe("Tool Definitions", () => {
     { name: "unarchive_configuration", requiredFields: ["configuration_id"], properties: ["configuration_id"] },
     { name: "search_flexible_assets", requiredFields: ["flexible_asset_type_id"], properties: ["flexible_asset_type_id", "organization_id", "name", "page_size", "page_number", "sort"] },
     { name: "list_flexible_asset_types", requiredFields: [], properties: ["organization_id"] },
+    { name: "list_flexible_asset_fields", requiredFields: ["flexible_asset_type_id"], properties: ["flexible_asset_type_id"] },
+    { name: "get_flexible_asset", requiredFields: ["id"], properties: ["id"] },
+    { name: "create_flexible_asset", requiredFields: ["organization_id", "flexible_asset_type_id", "traits"], properties: ["organization_id", "flexible_asset_type_id", "traits"] },
+    { name: "update_flexible_asset", requiredFields: ["id", "traits"], properties: ["id", "traits"] },
     { name: "search_user_metrics", requiredFields: [] as string[], properties: ["user_id", "organization_id", "resource_type", "start_date", "end_date", "sort", "page_size", "page_number"] },
     { name: "itglue_health_check", requiredFields: [] as string[], properties: [] as string[] },
   ];
@@ -383,7 +387,7 @@ describe("Tool Definitions", () => {
   });
 
   it("should have 31 tools total", () => {
-    expect(tools.length).toBe(31);
+    expect(tools.length).toBe(35);
   });
 });
 
@@ -1118,7 +1122,7 @@ describe("Unknown Tool Handling", () => {
     const client = await connectClient();
     const { tools } = await client.listTools();
 
-    expect(tools.length).toBe(31);
+    expect(tools.length).toBe(35);
     // Every advertised tool must reach a real branch — not the Unknown-tool
     // default — so a rename in the ListTools block can't drift from the switch.
     for (const tool of tools) {
@@ -1679,7 +1683,7 @@ describe("Locations tools (round-trip)", () => {
   it("exposes 31 tools total", async () => {
     const client = await connectLocationsClient();
     const { tools } = await client.listTools();
-    expect(tools.length).toBe(31);
+    expect(tools.length).toBe(35);
   });
 
   it("search_locations queries /locations filtered by organization and city", async () => {

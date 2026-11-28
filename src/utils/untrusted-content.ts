@@ -120,8 +120,11 @@ export const UNTRUSTED_CONTENT_TOOLS: ReadonlySet<string> = new Set([
   "list_attachments",
 
   // Flexible assets are entirely user-defined free-form fields — by design
-  // there is no schema constraining what an org puts in them.
+  // there is no schema constraining what an org puts in them. Field names
+  // and hints are free text too, set by whoever defined the type.
   "search_flexible_assets",
+  "get_flexible_asset",
+  "list_flexible_asset_fields",
 ]);
 
 /** Whether markers should be applied, per `ITGLUE_UNTRUSTED_MARKERS`. Defaults to on. */

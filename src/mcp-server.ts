@@ -21,6 +21,15 @@ import { registerPromptHandlers } from "./prompts.js";
 import { registerResourceHandlers } from "./resources.js";
 import { buildDocumentCard, DOCUMENT_CARD_META } from "./card.builder.js";
 import { applyUntrustedContentMarkers } from "./utils/untrusted-content.js";
+import {
+  type FlexibleAssetField,
+  checkSuppliedTraits,
+  mergeTraitsForUpdate,
+  missingRequired,
+  redactTraits,
+  sortFields,
+  toField,
+} from "./utils/flexible-assets.js";
 
 
 // IT Glue region configuration
@@ -259,6 +268,22 @@ function positiveInteger(value: unknown): number | undefined {
   return numeric;
 }
 
+/** A flexible asset type's fields, in display order (one request; types rarely have 100+ fields). */
+async function flexibleAssetFields(client: ITGlueClient, typeId: number): Promise<FlexibleAssetField[]> {
+  const result = await client.request<Record<string, unknown>>(
+    `/flexible_asset_types/${typeId}/relationships/flexible_asset_fields`,
+    { page: { size: 1000, number: 1 } }
+  );
+  return sortFields(result.data.map(toField).filter((f): f is FlexibleAssetField => f !== null));
+}
+
+/** The fields of the type a raw flexible asset belongs to. */
+async function fieldsOfAsset(client: ITGlueClient, raw: JsonApiResource): Promise<FlexibleAssetField[]> {
+  const typeId = positiveInteger(raw.attributes?.["flexible-asset-type-id"]);
+  if (typeId === undefined) throw new Error(`Flexible asset ${raw.id} has no flexible asset type`);
+  return flexibleAssetFields(client, typeId);
+}
+
 /**
  * Record types that IT Glue accepts attachments on, as the plural path segment
  * used by `/:resource_type/:resource_id/relationships/attachments`.
@@ -410,6 +435,38 @@ export class ITGlueClient {
   async get<T>(path: string, params: Record<string, unknown> = {}): Promise<T> {
     const result = await this.request<T>(path, params);
     return result.data[0];
+  }
+
+  /**
+   * One resource exactly as IT Glue returns it, without converting attribute keys to camelCase.
+   * Flexible asset traits are keyed by each field's name-key (for example `wan-ip`); the camelCase
+   * conversion in request() would change those keys, and writes need the originals.
+   */
+  async getRaw(path: string): Promise<JsonApiResource> {
+    const url = `${this.baseUrl}${path}`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        ...this.authHeaders(),
+        "Content-Type": "application/vnd.api+json",
+        Accept: "application/vnd.api+json",
+      },
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`IT Glue API error (${response.status}): ${errorBody}`);
+    }
+
+    const json = (await response.json()) as JsonApiResponse;
+
+    if (json.errors && json.errors.length > 0) {
+      const errorMessages = json.errors.map((e) => e.detail || e.title).join(", ");
+      throw new Error(`IT Glue API error: ${errorMessages}`);
+    }
+
+    return Array.isArray(json.data) ? json.data[0] : json.data;
   }
 
   async post<T>(path: string, body: Record<string, unknown>): Promise<T> {
@@ -2030,6 +2087,113 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
           required: ["flexible_asset_type_id"],
         },
       },
+      {
+        name: "list_flexible_asset_fields",
+        description:
+          "List the fields of one flexible asset type: each field's name_key (the key to use in " +
+          "traits for create_flexible_asset and update_flexible_asset), kind (Text, Textbox, Number, " +
+          "Date, Checkbox, Select, Tag, Password, Upload, Header ...), whether it is required, the " +
+          "record type a Tag field links to, and its hint. Call this before writing a flexible asset.",
+        annotations: {
+          title: "List flexible asset fields",
+          readOnlyHint: true,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            flexible_asset_type_id: {
+              type: "number",
+              description: "The flexible asset type ID (from list_flexible_asset_types)",
+            },
+          },
+          required: ["flexible_asset_type_id"],
+        },
+      },
+      {
+        name: "get_flexible_asset",
+        description:
+          "Get one flexible asset by ID, with its traits keyed by each field's name_key (the same " +
+          "keys update_flexible_asset takes). Password field values are redacted.",
+        annotations: {
+          title: "Get flexible asset",
+          readOnlyHint: true,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: {
+              type: "number",
+              description: "The flexible asset ID",
+            },
+          },
+          required: ["id"],
+        },
+      },
+      {
+        name: "create_flexible_asset",
+        description:
+          "Create a flexible asset of a given type in an organization. traits maps field name_keys " +
+          "(from list_flexible_asset_fields) to values: text for Text, Textbox (HTML allowed), Select " +
+          "and Date (YYYY-MM-DD); a number for Number; true/false for Checkbox; an array of record IDs " +
+          "for Tag. Every required field must be set. Unknown keys are refused.",
+        annotations: {
+          title: "Create flexible asset",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            organization_id: {
+              type: "number",
+              description: "Organization ID to create the flexible asset in",
+            },
+            flexible_asset_type_id: {
+              type: "number",
+              description: "The flexible asset type ID (from list_flexible_asset_types)",
+            },
+            traits: {
+              type: "object",
+              description: "Field name_key to value, for example {\"name\": \"Main office\", \"isp\": \"Example ISP\"}",
+            },
+          },
+          required: ["organization_id", "flexible_asset_type_id", "traits"],
+        },
+      },
+      {
+        name: "update_flexible_asset",
+        description:
+          "Change fields of an existing flexible asset. Only the fields in traits change; every other " +
+          "field keeps its current value (IT Glue replaces the whole trait set on update, so this tool " +
+          "reads the current values and sends them back with your changes). Set a field to null to " +
+          "clear it. Values take the same forms as create_flexible_asset. Refused when the asset holds " +
+          "a Password or Upload value that would have to be re-sent unchanged.",
+        annotations: {
+          title: "Update flexible asset",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: {
+              type: "number",
+              description: "The flexible asset ID to update",
+            },
+            traits: {
+              type: "object",
+              description: "Field name_key to new value (null clears the field)",
+            },
+          },
+          required: ["id", "traits"],
+        },
+      },
       // User metrics
       {
         name: "search_user_metrics",
@@ -3291,6 +3455,104 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               text: JSON.stringify(result, null, 2),
             },
           ],
+        };
+      }
+
+      case "list_flexible_asset_fields": {
+        const typeId = positiveInteger(args?.flexible_asset_type_id);
+        if (typeId === undefined) {
+          return {
+            content: [{ type: "text", text: "Error: flexible_asset_type_id must be a positive integer" }],
+            isError: true,
+          };
+        }
+        const fields = await flexibleAssetFields(client, typeId);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ flexible_asset_type_id: typeId, fields }, null, 2) }],
+        };
+      }
+
+      case "get_flexible_asset": {
+        const id = positiveInteger(args?.id);
+        if (id === undefined) {
+          return {
+            content: [{ type: "text", text: "Error: id must be a positive integer" }],
+            isError: true,
+          };
+        }
+        const raw = await client.getRaw(`/flexible_assets/${id}`);
+        const fields = await fieldsOfAsset(client, raw);
+        const { traits, ...rest } = raw.attributes ?? {};
+        const asset = {
+          ...deserializeResource({ ...raw, attributes: rest }),
+          traits: redactTraits(traits as Record<string, unknown> | undefined, fields),
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(asset, null, 2) }],
+        };
+      }
+
+      case "create_flexible_asset": {
+        const orgId = positiveInteger(args?.organization_id);
+        const typeId = positiveInteger(args?.flexible_asset_type_id);
+        if (orgId === undefined || typeId === undefined) {
+          return {
+            content: [{ type: "text", text: "Error: organization_id and flexible_asset_type_id must be positive integers" }],
+            isError: true,
+          };
+        }
+        const fields = await flexibleAssetFields(client, typeId);
+        const checked = checkSuppliedTraits(args?.traits, fields);
+        if ("error" in checked) {
+          return { content: [{ type: "text", text: `Error: ${checked.error}` }], isError: true };
+        }
+        const missing = missingRequired(checked.traits, fields);
+        if (missing.length > 0) {
+          return {
+            content: [{ type: "text", text: `Error: required field(s) not set: ${missing.join(", ")}` }],
+            isError: true,
+          };
+        }
+        const created = await client.post<Record<string, unknown>>("/flexible_assets", {
+          data: {
+            type: "flexible-assets",
+            attributes: { organization_id: orgId, flexible_asset_type_id: typeId, traits: checked.traits },
+          },
+        });
+        const { traits: _createdTraits, ...summary } = created ?? {};
+        return {
+          content: [{ type: "text", text: JSON.stringify({ ...summary, fields_set: Object.keys(checked.traits) }, null, 2) }],
+        };
+      }
+
+      case "update_flexible_asset": {
+        const id = positiveInteger(args?.id);
+        if (id === undefined) {
+          return {
+            content: [{ type: "text", text: "Error: id must be a positive integer" }],
+            isError: true,
+          };
+        }
+        const raw = await client.getRaw(`/flexible_assets/${id}`);
+        const fields = await fieldsOfAsset(client, raw);
+        const checked = checkSuppliedTraits(args?.traits, fields);
+        if ("error" in checked) {
+          return { content: [{ type: "text", text: `Error: ${checked.error}` }], isError: true };
+        }
+        const merged = mergeTraitsForUpdate(
+          raw.attributes?.traits as Record<string, unknown> | undefined,
+          checked.traits,
+          fields
+        );
+        if ("error" in merged) {
+          return { content: [{ type: "text", text: `Error: ${merged.error}` }], isError: true };
+        }
+        const updated = await client.patch<Record<string, unknown>>(`/flexible_assets/${id}`, {
+          data: { type: "flexible-assets", attributes: { traits: merged.traits } },
+        });
+        const { traits: _updatedTraits, ...summary } = updated ?? {};
+        return {
+          content: [{ type: "text", text: JSON.stringify({ ...summary, fields_changed: Object.keys(checked.traits) }, null, 2) }],
         };
       }
 
