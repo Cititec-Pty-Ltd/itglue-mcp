@@ -2175,7 +2175,8 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
         annotations: {
           title: "Update flexible asset",
           readOnlyHint: false,
-          destructiveHint: false,
+          // Overwrites or clears (null) existing field values.
+          destructiveHint: true,
           idempotentHint: true,
           openWorldHint: true,
         },
