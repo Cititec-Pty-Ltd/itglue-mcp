@@ -3,6 +3,16 @@
 ### Added
 
 - **`update_configuration`**: update chosen fields on a configuration with `PATCH /configurations/:id`. Only an allow-listed set of fields is sent (text fields, two dates as `YYYY-MM-DD`, and type, status, location, contact, manufacturer, model and operating-system IDs); the organization and archive state cannot be changed through it. The result names any supplied field that IT Glue returned unchanged.
+- **Flexible asset write tools.** `list_flexible_asset_fields` lists a type's fields (name_key,
+  kind, required, tag type, hint); `get_flexible_asset` reads one asset with its traits keyed by
+  the real field name_keys (the camelCase conversion other tools apply would change them), with
+  Password values redacted; `create_flexible_asset` checks every key against the type's fields
+  and that required fields are set; `update_flexible_asset` changes only the fields given.
+  IT Glue replaces a flexible asset's whole trait set on update, so the tool reads the current
+  traits, converts tag values back to the ID arrays IT Glue takes on write, and sends everything
+  back with the changes. It refuses an asset whose Password or Upload value would have to be
+  re-sent unchanged, rather than risk losing it. The two read tools carry the untrusted-content
+  markers.
 
 ### Changed
 

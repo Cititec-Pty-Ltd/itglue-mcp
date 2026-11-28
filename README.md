@@ -161,6 +161,10 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 ### Flexible Assets
 
 - **search_flexible_assets** - Search for flexible assets (requires flexible_asset_type_id)
+- **list_flexible_asset_fields** - A flexible asset type's fields: name_key (the key used in traits), kind, required, tag type and hint
+- **get_flexible_asset** - One flexible asset by ID, traits keyed by field name_key; Password values are redacted
+- **create_flexible_asset** - Create a flexible asset; checks every key against the type's fields and that required fields are set
+- **update_flexible_asset** - Change only the fields given. IT Glue replaces the whole trait set on update, so the tool reads the current values and sends them back with the changes (tag fields as ID arrays). Refused when a Password or Upload value would have to be re-sent unchanged
 
 ### User Metrics
 

@@ -71,6 +71,8 @@ const WRITE_TOOLS = [
   "archive_configuration",
   "unarchive_configuration",
   "update_configuration",
+  "create_flexible_asset",
+  "update_flexible_asset",
 ];
 
 describe("write tool annotations", () => {
