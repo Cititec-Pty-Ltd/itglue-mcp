@@ -177,6 +177,15 @@ describe("flexible asset tools", () => {
     mockFetch.mockReset();
   });
 
+  it("annotates the reads read-only, create additive and update destructive", async () => {
+    const { tools } = await (await connect()).listTools();
+    const hints = (n: string) => tools.find((t) => t.name === n)?.annotations;
+    expect(hints("list_flexible_asset_fields")?.readOnlyHint).toBe(true);
+    expect(hints("get_flexible_asset")?.readOnlyHint).toBe(true);
+    expect(hints("create_flexible_asset")).toMatchObject({ readOnlyHint: false, destructiveHint: false });
+    expect(hints("update_flexible_asset")).toMatchObject({ readOnlyHint: false, destructiveHint: true });
+  });
+
   it("list_flexible_asset_fields returns name keys and kinds in order", async () => {
     const client = await connect();
     mockFetch.mockReturnValueOnce(respond(FIELD_RECORDS));
